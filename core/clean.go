@@ -404,6 +404,8 @@ const (
 	MacHiddenFile
 	WindowsHiddenFile
 	EmptyFolder
+	LinuxHiddenFile
+	OfficeTempFile
 )
 
 // String returns the string representation of a DirtyFileType
@@ -419,6 +421,10 @@ func (d DirtyFileType) String() string {
 		return "Windows Thumbs.db files"
 	case EmptyFolder:
 		return "Empty folders"
+	case LinuxHiddenFile:
+		return "Linux/MacOS hidden files (starting with .)"
+	case OfficeTempFile:
+		return "Office temporary files"
 	default:
 		return "Unknown"
 	}
@@ -431,6 +437,8 @@ func isDirtyFile(path string, info os.FileInfo) bool {
 		return isEmptyFolder(path)
 	}
 
+	fileName := filepath.Base(path)
+
 	// Check for empty file
 	if info.Size() == 0 {
 		return true
@@ -441,13 +449,23 @@ func isDirtyFile(path string, info os.FileInfo) bool {
 		return true
 	}
 
+	// Check for Linux/MacOS hidden files (starting with .)
+	if strings.HasPrefix(fileName, ".") && fileName != "." {
+		return true
+	}
+
+	// Check for Office temporary files
+	if isOfficeTempFile(fileName) {
+		return true
+	}
+
 	// Check for macOS .DS_Store
-	if filepath.Base(path) == ".DS_Store" {
+	if fileName == ".DS_Store" {
 		return true
 	}
 
 	// Check for Windows Thumbs.db
-	if filepath.Base(path) == "Thumbs.db" {
+	if fileName == "Thumbs.db" {
 		return true
 	}
 
@@ -477,6 +495,34 @@ func isEmptyFolder(folderPath string) bool {
 	return true
 }
 
+// isOfficeTempFile checks if a file is an Office temporary file
+func isOfficeTempFile(fileName string) bool {
+	// Check for files starting with ~$ (common Office temp file pattern)
+	if strings.HasPrefix(fileName, "~$") {
+		return true
+	}
+
+	// Get file extension
+	ext := strings.ToLower(filepath.Ext(fileName))
+
+	// Common Office temporary file extensions
+	tempExtensions := []string{".tmp", ".temp", ".asd", ".wbk", ".xlk", ".tmp2"}
+	for _, tempExt := range tempExtensions {
+		if ext == tempExt {
+			return true
+		}
+	}
+
+	// Additional check for temporary files that might not have extensions
+	// but have common Office temp file patterns
+	nameWithoutExt := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+	if strings.HasSuffix(nameWithoutExt, "~") {
+		return true
+	}
+
+	return false
+}
+
 // findDirtyFiles finds all dirty files in the specified folders
 func findDirtyFiles(folderPaths []string) (map[DirtyFileType][]string, error) {
 	dirtyFiles := make(map[DirtyFileType][]string)
@@ -494,6 +540,8 @@ func findDirtyFiles(folderPaths []string) (map[DirtyFileType][]string, error) {
 					dirtyFiles[EmptyFolder] = append(dirtyFiles[EmptyFolder], path)
 				}
 			} else {
+				fileName := filepath.Base(path)
+
 				// Check for empty files
 				if info.Size() == 0 {
 					dirtyFiles[EmptyFile] = append(dirtyFiles[EmptyFile], path)
@@ -504,13 +552,23 @@ func findDirtyFiles(folderPaths []string) (map[DirtyFileType][]string, error) {
 					dirtyFiles[SmallFile] = append(dirtyFiles[SmallFile], path)
 				}
 
+				// Check for Linux/MacOS hidden files (starting with .)
+				if strings.HasPrefix(fileName, ".") && fileName != "." {
+					dirtyFiles[LinuxHiddenFile] = append(dirtyFiles[LinuxHiddenFile], path)
+				}
+
+				// Check for Office temporary files
+				if isOfficeTempFile(fileName) {
+					dirtyFiles[OfficeTempFile] = append(dirtyFiles[OfficeTempFile], path)
+				}
+
 				// Check for macOS .DS_Store
-				if filepath.Base(path) == ".DS_Store" {
+				if fileName == ".DS_Store" {
 					dirtyFiles[MacHiddenFile] = append(dirtyFiles[MacHiddenFile], path)
 				}
 
 				// Check for Windows Thumbs.db
-				if filepath.Base(path) == "Thumbs.db" {
+				if fileName == "Thumbs.db" {
 					dirtyFiles[WindowsHiddenFile] = append(dirtyFiles[WindowsHiddenFile], path)
 				}
 			}
@@ -529,7 +587,7 @@ func findDirtyFiles(folderPaths []string) (map[DirtyFileType][]string, error) {
 // handleDirtyFiles handles the removal of dirty files based on user selection
 func handleDirtyFiles(folderPaths []string, listOnly bool, deleteToDir string) error {
 	// Define all possible dirty file types
-	allDirtyTypes := []DirtyFileType{EmptyFile, SmallFile, MacHiddenFile, WindowsHiddenFile, EmptyFolder}
+	allDirtyTypes := []DirtyFileType{EmptyFile, SmallFile, MacHiddenFile, WindowsHiddenFile, EmptyFolder, LinuxHiddenFile, OfficeTempFile}
 
 	// Prepare options for user selection
 	options := make([]string, len(allDirtyTypes))
@@ -537,22 +595,28 @@ func handleDirtyFiles(folderPaths []string, listOnly bool, deleteToDir string) e
 		options[i] = dirtyType.String()
 	}
 
-	// Ask user which types of dirty files to clean
+	// Ask user which types of dirty files to clean - default to all selected
 	selectedOptions, err := util.SelectMultiple(
-		"Select types of dirty files to clean:",
+		"Select types of dirty files to clean (default: all selected):",
 		options,
 	)
 	if err != nil {
 		return fmt.Errorf("error getting user selection: %v", err)
 	}
 
-	// Convert selected options back to DirtyFileTypes
+	// If no options are selected (user deselected all), default to all
 	var selectedDirtyTypes []DirtyFileType
-	for _, selectedOption := range selectedOptions {
-		for _, dirtyType := range allDirtyTypes {
-			if dirtyType.String() == selectedOption {
-				selectedDirtyTypes = append(selectedDirtyTypes, dirtyType)
-				break
+	if len(selectedOptions) == 0 {
+		// If user deselected all, default to all types
+		selectedDirtyTypes = allDirtyTypes
+	} else {
+		// Convert selected options back to DirtyFileTypes
+		for _, selectedOption := range selectedOptions {
+			for _, dirtyType := range allDirtyTypes {
+				if dirtyType.String() == selectedOption {
+					selectedDirtyTypes = append(selectedDirtyTypes, dirtyType)
+					break
+				}
 			}
 		}
 	}
