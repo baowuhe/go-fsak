@@ -595,28 +595,22 @@ func handleDirtyFiles(folderPaths []string, listOnly bool, deleteToDir string) e
 		options[i] = dirtyType.String()
 	}
 
-	// Ask user which types of dirty files to clean - default to all selected
+	// Ask user which types of dirty files to clean
 	selectedOptions, err := util.SelectMultiple(
-		"Select types of dirty files to clean (default: all selected):",
+		"Select types of dirty files to clean:",
 		options,
 	)
 	if err != nil {
 		return fmt.Errorf("error getting user selection: %v", err)
 	}
 
-	// If no options are selected (user deselected all), default to all
+	// Convert selected options back to DirtyFileTypes
 	var selectedDirtyTypes []DirtyFileType
-	if len(selectedOptions) == 0 {
-		// If user deselected all, default to all types
-		selectedDirtyTypes = allDirtyTypes
-	} else {
-		// Convert selected options back to DirtyFileTypes
-		for _, selectedOption := range selectedOptions {
-			for _, dirtyType := range allDirtyTypes {
-				if dirtyType.String() == selectedOption {
-					selectedDirtyTypes = append(selectedDirtyTypes, dirtyType)
-					break
-				}
+	for _, selectedOption := range selectedOptions {
+		for _, dirtyType := range allDirtyTypes {
+			if dirtyType.String() == selectedOption {
+				selectedDirtyTypes = append(selectedDirtyTypes, dirtyType)
+				break
 			}
 		}
 	}
