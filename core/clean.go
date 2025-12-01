@@ -634,15 +634,64 @@ func handleDirtyFiles(folderPaths []string, listOnly bool, deleteToDir string) e
 		}
 	}
 
+	// If not list only, allow user to select specific files within each category
+	if !listOnly {
+		// For each category, if there are more than 1 file, allow user to select which ones to delete
+		for dt, files := range filteredDirtyFiles {
+			if len(files) > 1 {
+				util.PrintProcess("\nSelect files to delete from %s category:\n", dt.String())
+
+				// Prepare options for file selection - include individual files and "All" option
+				fileOptions := make([]string, len(files))
+				for i, file := range files {
+					fileOptions[i] = file
+				}
+
+				// Add "All" option if there are multiple files
+				allOption := fmt.Sprintf("All %d files", len(files))
+				fileOptions = append(fileOptions, allOption)
+
+				// Ask user which files to delete from this category
+				selectedFileOptions, err := util.SelectMultiple(
+					fmt.Sprintf("Select files to delete from %s (use space to select multiple, enter to confirm):", dt.String()),
+					fileOptions,
+				)
+				if err != nil {
+					return fmt.Errorf("error getting user selection for %s: %v", dt.String(), err)
+				}
+
+				// Process the selected options
+				var selectedFiles []string
+				for _, selectedOption := range selectedFileOptions {
+					if selectedOption == allOption {
+						// If "All" was selected, include all files
+						selectedFiles = files
+						break
+					} else {
+						// Otherwise, add the specific file
+						selectedFiles = append(selectedFiles, selectedOption)
+					}
+				}
+
+				// Update the filteredDirtyFiles map with only the selected files
+				filteredDirtyFiles[dt] = selectedFiles
+			}
+		}
+	}
+
 	// Display results
 	totalFiles := 0
 	for dt, files := range filteredDirtyFiles {
+		// Remove empty entries after user selection
 		if len(files) > 0 {
 			util.PrintProcess("\n%s (%d):\n", dt.String(), len(files))
 			for _, file := range files {
 				util.PrintProcess("  %s\n", file)
 			}
 			totalFiles += len(files)
+		} else {
+			// If user deselected all files in a category, remove it from the map
+			delete(filteredDirtyFiles, dt)
 		}
 	}
 
