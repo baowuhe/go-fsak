@@ -17,7 +17,7 @@ import (
 var cleanCmd = &cobra.Command{
 	Use:   "clean",
 	Short: "Clean operations for database",
-	Long:  `Commands for cleaning database entries.`,
+	Long:  `Commands for cleaning database entries and files.`,
 }
 
 // infoCmd represents the clean info command
@@ -50,11 +50,41 @@ var cleanDupCmd = &cobra.Command{
 	},
 }
 
+// dirtyCmd represents the clean dirty command for removing dirty files
+var cleanDirtyCmd = &cobra.Command{
+	Use:   "dirty [folder paths...]",
+	Short: "Remove dirty files from specified folders",
+	Long:  `Remove dirty files from specified folder paths based on user selection. Dirty files are defined as: files with 0 size, files smaller than 1KB, .DS_Store files on macOS, Thumbs.db files on Windows, and empty folders.`,
+	Args:  cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		listOnly, _ := cmd.Flags().GetBool("list")
+		deleteToDir, _ := cmd.Flags().GetString("delete-to-dir")
+
+		if deleteToDir == "" && !listOnly {
+			util.PrintError("Error: --delete-to-dir (-d) flag is required when not using --list\n")
+			os.Exit(1)
+		}
+
+		err := handleDirtyFiles(args, listOnly, deleteToDir)
+		if err != nil {
+			util.PrintError("Error during dirty file operation: %v\n", err)
+			os.Exit(1)
+		}
+	},
+}
+
 func init() {
 	cleanCmd.AddCommand(cleanInfoCmd)
 	cleanDupCmd.Flags().StringP("deleted-save-dir", "d", "", "Directory to move deleted files to (default is workspace/deleted)")
 	cleanDupCmd.MarkFlagDirname("deleted-save-dir")
 	cleanCmd.AddCommand(cleanDupCmd)
+
+	// Add dirty command with its flags
+	cleanDirtyCmd.Flags().BoolP("list", "l", false, "List dirty files only, don't delete")
+	cleanDirtyCmd.Flags().StringP("delete-to-dir", "d", "", "Directory to move deleted files to (required when not using --list)")
+	cleanDirtyCmd.MarkFlagDirname("delete-to-dir")
+	cleanCmd.AddCommand(cleanDirtyCmd)
+
 	rootCmd.AddCommand(cleanCmd)
 }
 
@@ -363,4 +393,276 @@ func getRelativePathFromParent(filePath string, folderPaths []string) (string, e
 		}
 	}
 	return "", fmt.Errorf("file %s does not belong to any of the specified folders", filePath)
+}
+
+// Dirty file types for user selection
+type DirtyFileType int
+
+const (
+	EmptyFile DirtyFileType = iota
+	SmallFile
+	MacHiddenFile
+	WindowsHiddenFile
+	EmptyFolder
+)
+
+// String returns the string representation of a DirtyFileType
+func (d DirtyFileType) String() string {
+	switch d {
+	case EmptyFile:
+		return "Files with size 0"
+	case SmallFile:
+		return "Files smaller than 1KB"
+	case MacHiddenFile:
+		return "macOS .DS_Store files"
+	case WindowsHiddenFile:
+		return "Windows Thumbs.db files"
+	case EmptyFolder:
+		return "Empty folders"
+	default:
+		return "Unknown"
+	}
+}
+
+// isDirtyFile checks if a file matches any of the dirty file criteria
+func isDirtyFile(path string, info os.FileInfo) bool {
+	// Check if it's a directory
+	if info.IsDir() {
+		return isEmptyFolder(path)
+	}
+
+	// Check for empty file
+	if info.Size() == 0 {
+		return true
+	}
+
+	// Check for small file (< 1KB)
+	if info.Size() < 1024 {
+		return true
+	}
+
+	// Check for macOS .DS_Store
+	if filepath.Base(path) == ".DS_Store" {
+		return true
+	}
+
+	// Check for Windows Thumbs.db
+	if filepath.Base(path) == "Thumbs.db" {
+		return true
+	}
+
+	return false
+}
+
+// isEmptyFolder checks if a folder is empty (contains no files or only empty subfolders)
+func isEmptyFolder(folderPath string) bool {
+	entries, err := os.ReadDir(folderPath)
+	if err != nil {
+		return false
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			// If it's a subdirectory, check if it's empty
+			if !isEmptyFolder(filepath.Join(folderPath, entry.Name())) {
+				return false
+			}
+		} else {
+			// If it's a file, the folder is not empty
+			return false
+		}
+	}
+
+	// If we get here, the folder is empty or only contains empty subfolders
+	return true
+}
+
+// findDirtyFiles finds all dirty files in the specified folders
+func findDirtyFiles(folderPaths []string) (map[DirtyFileType][]string, error) {
+	dirtyFiles := make(map[DirtyFileType][]string)
+
+	for _, folderPath := range folderPaths {
+		err := filepath.Walk(folderPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				// Skip files that can't be accessed
+				return nil
+			}
+
+			// Check if the file/directory matches any dirty criteria
+			if info.IsDir() {
+				if isEmptyFolder(path) {
+					dirtyFiles[EmptyFolder] = append(dirtyFiles[EmptyFolder], path)
+				}
+			} else {
+				// Check for empty files
+				if info.Size() == 0 {
+					dirtyFiles[EmptyFile] = append(dirtyFiles[EmptyFile], path)
+				}
+
+				// Check for small files (< 1KB)
+				if info.Size() > 0 && info.Size() < 1024 {
+					dirtyFiles[SmallFile] = append(dirtyFiles[SmallFile], path)
+				}
+
+				// Check for macOS .DS_Store
+				if filepath.Base(path) == ".DS_Store" {
+					dirtyFiles[MacHiddenFile] = append(dirtyFiles[MacHiddenFile], path)
+				}
+
+				// Check for Windows Thumbs.db
+				if filepath.Base(path) == "Thumbs.db" {
+					dirtyFiles[WindowsHiddenFile] = append(dirtyFiles[WindowsHiddenFile], path)
+				}
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			return nil, fmt.Errorf("error walking folder %s: %v", folderPath, err)
+		}
+	}
+
+	return dirtyFiles, nil
+}
+
+// handleDirtyFiles handles the removal of dirty files based on user selection
+func handleDirtyFiles(folderPaths []string, listOnly bool, deleteToDir string) error {
+	// Define all possible dirty file types
+	allDirtyTypes := []DirtyFileType{EmptyFile, SmallFile, MacHiddenFile, WindowsHiddenFile, EmptyFolder}
+
+	// Prepare options for user selection
+	options := make([]string, len(allDirtyTypes))
+	for i, dirtyType := range allDirtyTypes {
+		options[i] = dirtyType.String()
+	}
+
+	// Ask user which types of dirty files to clean
+	selectedOptions, err := util.SelectMultiple(
+		"Select types of dirty files to clean:",
+		options,
+	)
+	if err != nil {
+		return fmt.Errorf("error getting user selection: %v", err)
+	}
+
+	// Convert selected options back to DirtyFileTypes
+	var selectedDirtyTypes []DirtyFileType
+	for _, selectedOption := range selectedOptions {
+		for _, dirtyType := range allDirtyTypes {
+			if dirtyType.String() == selectedOption {
+				selectedDirtyTypes = append(selectedDirtyTypes, dirtyType)
+				break
+			}
+		}
+	}
+
+	if len(selectedDirtyTypes) == 0 {
+		util.PrintSuccess("No dirty file types selected. Nothing to do.\n")
+		return nil
+	}
+
+	// Find all dirty files
+	dirtyFiles, err := findDirtyFiles(folderPaths)
+	if err != nil {
+		return fmt.Errorf("error finding dirty files: %v", err)
+	}
+
+	// Filter dirty files based on user selection
+	filteredDirtyFiles := make(map[DirtyFileType][]string)
+	for _, dt := range selectedDirtyTypes {
+		if files, exists := dirtyFiles[dt]; exists {
+			filteredDirtyFiles[dt] = files
+		}
+	}
+
+	// Display results
+	totalFiles := 0
+	for dt, files := range filteredDirtyFiles {
+		if len(files) > 0 {
+			util.PrintProcess("\n%s (%d):\n", dt.String(), len(files))
+			for _, file := range files {
+				util.PrintProcess("  %s\n", file)
+			}
+			totalFiles += len(files)
+		}
+	}
+
+	if totalFiles == 0 {
+		util.PrintSuccess("No dirty files found matching your selection.\n")
+		return nil
+	}
+
+	util.PrintProcess("\nTotal dirty files found: %d\n", totalFiles)
+
+	// If list only, exit here
+	if listOnly {
+		util.PrintSuccess("Listing only - no files were deleted.\n")
+		return nil
+	}
+
+	// Ask for confirmation before deletion
+	confirmed, err := util.Confirm("Do you want to proceed with deletion? (y/N)", false)
+	if err != nil {
+		return fmt.Errorf("error getting confirmation: %v", err)
+	}
+
+	if !confirmed {
+		util.PrintSuccess("Operation cancelled by user.\n")
+		return nil
+	}
+
+	// Create the destination directory if it doesn't exist
+	if err := os.MkdirAll(deleteToDir, 0755); err != nil {
+		return fmt.Errorf("error creating delete directory %s: %v", deleteToDir, err)
+	}
+
+	// Process deletions
+	filesDeleted := 0
+	for _, files := range filteredDirtyFiles {
+		for _, file := range files {
+			// Create destination path preserving directory structure
+			relPath, err := filepath.Rel(folderPaths[0], file)
+			if err != nil {
+				// If we can't get relative path, just use the filename
+				relPath = filepath.Base(file)
+			}
+			destPath := filepath.Join(deleteToDir, relPath)
+
+			// For directories, we need to make sure the destination path is unique
+			if info, err := os.Stat(file); err == nil && info.IsDir() {
+				// For directories, append a suffix to avoid conflicts
+				counter := 1
+				originalDestPath := destPath
+				for {
+					if _, err := os.Stat(destPath); os.IsNotExist(err) {
+						break
+					}
+					ext := filepath.Ext(originalDestPath)
+					name := strings.TrimSuffix(originalDestPath, ext)
+					destPath = fmt.Sprintf("%s_%d%s", name, counter, ext)
+					counter++
+				}
+			}
+
+			// Create destination directory if needed
+			destDir := filepath.Dir(destPath)
+			if err := os.MkdirAll(destDir, 0755); err != nil {
+				util.PrintError("Error creating destination directory for %s: %v\n", file, err)
+				continue
+			}
+
+			// Move the file/directory to the delete directory
+			if err := os.Rename(file, destPath); err != nil {
+				util.PrintError("Error moving %s to %s: %v\n", file, destPath, err)
+				continue
+			}
+
+			util.PrintProcess("Moved %s to %s\n", file, destPath)
+			filesDeleted++
+		}
+	}
+
+	util.PrintSuccess("Successfully moved %d dirty files to %s\n", filesDeleted, deleteToDir)
+	return nil
 }
